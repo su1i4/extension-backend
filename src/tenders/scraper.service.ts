@@ -48,7 +48,14 @@ export class ScraperService implements OnModuleDestroy {
     try {
       this.browser = await puppeteer.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--single-process',
+          '--no-zygote',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+        ],
       });
       const page = await this.browser.newPage();
       await page.setUserAgent(
