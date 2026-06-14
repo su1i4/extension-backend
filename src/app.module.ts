@@ -21,6 +21,7 @@ import { Tender } from './tenders/tender.entity';
         entities: [Tender],
         autoLoadEntities: true,
         synchronize: true,
+        dropSchema:true,
         ssl:
           process.env.NODE_ENV === 'production'
             ? { rejectUnauthorized: false }

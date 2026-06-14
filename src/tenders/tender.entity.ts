@@ -32,8 +32,21 @@ export class Tender {
   @Column({ type: 'varchar', length: 64, nullable: true })
   plannedSumRaw?: string;
 
+  // срок подачи: сырая строка + распарсенная дата (для сортировки/фильтров)
   @Column({ type: 'varchar', length: 64, nullable: true })
   deadline?: string;
+
+  @Index()
+  @Column({ type: 'timestamptz', nullable: true })
+  deadlineAt?: Date;
+
+  // дата публикации на портале: сырая строка + распарсенная дата (для сортировки)
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  publishDate?: string;
+
+  @Index()
+  @Column({ type: 'timestamptz', nullable: true })
+  publishedAt?: Date;
 
   @Index()
   @Column({ type: 'varchar', length: 64, nullable: true })
@@ -41,6 +54,27 @@ export class Tender {
 
   @Column({ type: 'text', nullable: true })
   verdictReason?: string;
+
+  // --- экономика (для дашборда и фильтров ТЗ) ---
+  @Column({ type: 'bigint', nullable: true })
+  cost?: number; // себестоимость
+
+  @Column({ type: 'bigint', nullable: true })
+  profit?: number; // чистая прибыль = сумма − полная себестоимость
+
+  @Column({ type: 'bigint', nullable: true })
+  grossProfit?: number; // валовая прибыль = сумма − (товар + доставка)
+
+  @Index()
+  @Column({ type: 'double precision', nullable: true })
+  margin?: number; // маржа %
+
+  @Column({ type: 'double precision', nullable: true })
+  roi?: number; // ROI %
+
+  @Index()
+  @Column({ type: 'varchar', length: 4, nullable: true })
+  rating?: string; // A+ / A / B / C / D / F
 
   // полный JSON-ответ AI (лоты, риски, выгодность)
   @Column({ type: 'jsonb', nullable: true })
