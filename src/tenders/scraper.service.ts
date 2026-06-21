@@ -2,7 +2,9 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import * as puppeteer from 'puppeteer';
 import { TendersService } from './tenders.service';
-import { AiService } from '../ai/ai.service'; // ← путь под свой проект
+import { AiService } from '../ai/ai.service';
+import { DocsService } from '../ai/docs.service';
+import { PriceSourcesService } from '../source/source.service';
 
 const LIST_URL = 'https://zakupki.okmot.kg/popp/view/order/list.xhtml';
 const UA =
@@ -20,6 +22,8 @@ export class ScraperService implements OnModuleDestroy {
   constructor(
     private readonly tendersService: TendersService,
     private readonly aiService: AiService,
+    private readonly docsService: DocsService,
+    private readonly priceSourcesService: PriceSourcesService,
   ) {}
 
   async onModuleDestroy() {
@@ -149,6 +153,33 @@ export class ScraperService implements OnModuleDestroy {
     });
   }
 
+  // раскрыть строки лотов (PrimeFaces toggler) — догружает таблицу «Продукты» с файлами
+  private async expandLotRows(page: puppeteer.Page) {
+    const sel = '[id$="lotsTable_data"] .ui-row-toggler[aria-expanded="false"]';
+    for (let i = 0; i < 50; i++) {
+      const toggler = await page.$(sel);
+      if (!toggler) break;
+      const before = await page
+        .$$eval(
+          '[id$="lotsTable_data"] tr.ui-expanded-row-content',
+          (els) => els.length,
+        )
+        .catch(() => 0);
+      await toggler.click();
+      await page
+        .waitForFunction(
+          (n: number) =>
+            document.querySelectorAll(
+              '[id$="lotsTable_data"] tr.ui-expanded-row-content',
+            ).length > n,
+          { timeout: 8000 },
+          before,
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
   // распарсить детальную страницу закупки (лоты + требования)
   private async extractDetail(
     page: puppeteer.Page,
@@ -201,6 +232,143 @@ export class ScraperService implements OnModuleDestroy {
     });
   }
 
+  // берём только файлы из колонки «Детальное описание товара в виде файла»
+  private async extractAttachments(
+    page: puppeteer.Page,
+  ): Promise<{ label: string; filename: string; url: string }[]> {
+    return page.evaluate(() => {
+      const HEADER = 'Детальное описание товара в виде файла';
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const seen = new Set<string>();
+      const out: { label: string; filename: string; url: string }[] = [];
+
+      document.querySelectorAll('table').forEach((table) => {
+        const headers = Array.from(table.querySelectorAll('thead th'));
+        const colIdx = headers.findIndex((th) =>
+          norm(th.textContent || '').includes(HEADER),
+        );
+        if (colIdx === -1) return;
+
+        table.querySelectorAll('tbody > tr').forEach((row) => {
+          const cells = row.querySelectorAll(':scope > td');
+          const cell = cells[colIdx];
+          if (!cell) return;
+          cell
+            .querySelectorAll('a[href*="/popp/download?key="]')
+            .forEach((a) => {
+              const href = (a as HTMLAnchorElement).href;
+              let key = '';
+              try {
+                key = new URL(href).searchParams.get('key') || '';
+              } catch {
+                key = '';
+              }
+              if (!key || seen.has(href)) return;
+              seen.add(href);
+              const filename = norm(a.textContent || '');
+              out.push({ label: HEADER, filename, url: href });
+            });
+        });
+      });
+
+      return out;
+    });
+  }
+
+  // скачать файл через сессию страницы (cookies переиспользуются)
+  private async downloadFile(
+    page: puppeteer.Page,
+    url: string,
+    maxBytes = 10 * 1024 * 1024,
+  ): Promise<{ buffer: Buffer; contentType: string } | null> {
+    try {
+      const result = await page.evaluate(
+        async (fileUrl: string, limit: number) => {
+          const res = await fetch(fileUrl, { credentials: 'include' });
+          if (!res.ok) return { error: `status ${res.status}` };
+          const contentType = res.headers.get('content-type') || '';
+          const len = parseInt(res.headers.get('content-length') || '0', 10);
+          if (len && len > limit) return { error: `too big ${len}` };
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength > limit)
+            return { error: `too big ${buf.byteLength}` };
+          const bytes = new Uint8Array(buf);
+          let binary = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode(
+              ...(bytes.subarray(i, i + chunk) as unknown as number[]),
+            );
+          }
+          return { base64: btoa(binary), contentType };
+        },
+        url,
+        maxBytes,
+      );
+
+      if (!result || (result as any).error) {
+        if (result && (result as any).error)
+          this.logger.warn(`Скачивание ${url}: ${(result as any).error}`);
+        return null;
+      }
+      const r = result as { base64: string; contentType: string };
+      return {
+        buffer: Buffer.from(r.base64, 'base64'),
+        contentType: r.contentType,
+      };
+    } catch (e) {
+      this.logger.warn(`Скачивание не удалось ${url}: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  // имя без расширения → добавим по content-type (для DocsService важно расширение)
+  private ensureExt(name: string, contentType: string): string {
+    const base = name && name.trim() ? name.trim() : 'file';
+    if (/\.(pdf|docx?|xlsx?)$/i.test(base)) return base;
+    const map: Record<string, string> = {
+      'application/pdf': 'pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        'docx',
+      'application/msword': 'doc',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        'xlsx',
+      'application/vnd.ms-excel': 'xls',
+    };
+    const ct = contentType.split(';')[0].trim().toLowerCase();
+    const ext = map[ct];
+    return ext ? `${base}.${ext}` : base;
+  }
+
+  // скачать файлы «детальное описание товара» и вытащить из них текст
+  private async collectDocsText(page: puppeteer.Page): Promise<string> {
+    await this.expandLotRows(page);
+    const attachments = await this.extractAttachments(page);
+    if (!attachments.length) return '';
+
+    const files: { buffer: Buffer; filename: string }[] = [];
+    for (const att of attachments) {
+      const dl = await this.downloadFile(page, att.url);
+      if (!dl) continue;
+      // HTML вместо файла = редирект/страница регистрации, не документ
+      if (dl.contentType.toLowerCase().includes('text/html')) {
+        this.logger.warn(
+          `Пропуск ${att.filename || att.url}: вернулся HTML (нужна авторизация?)`,
+        );
+        continue;
+      }
+      const filename = this.ensureExt(
+        att.filename || att.label,
+        dl.contentType,
+      );
+      files.push({ buffer: dl.buffer, filename });
+    }
+    if (!files.length) return '';
+
+    const text = await this.docsService.extractMany(files);
+    return text ? `\n\nДОКУМЕНТЫ ЗАКУПКИ:\n${text}\n` : '';
+  }
+
   private async closeBrowser() {
     if (this.browser) {
       await this.browser.close();
@@ -208,87 +376,24 @@ export class ScraperService implements OnModuleDestroy {
     }
   }
 
-  // ============================================================
-  // ОБЫЧНЫЙ СБОР (без AI) — для базы/статистики
-  // ============================================================
-  async scrapeAll(
-    maxPages = 50,
-  ): Promise<{ collected: number; pages: number }> {
-    if (this.isRunning) {
-      this.logger.warn('Сбор уже идёт, новый запуск отклонён');
-      return { collected: 0, pages: 0 };
-    }
-
-    this.isRunning = true;
-    this.progress = {
-      collected: 0,
-      pages: 0,
-      finishedAt: 0,
-      startedAt: Date.now(),
-    };
-    let collected = 0;
-    let pages = 0;
-
+  async debugDocs(viewUrl: string) {
+    const page = await this.launchBrowser();
     try {
-      const page = await this.launchBrowser();
-
-      this.logger.log(`Открываю ${LIST_URL}`);
-      await this.safeGoto(page, LIST_URL);
-      await page.waitForSelector('[id$="table_data"] > tr', {
-        timeout: 30_000,
-      });
-
-      while (pages < maxPages) {
-        pages++;
-        await page.waitForSelector('[id$="table_data"] > tr', {
-          timeout: 30_000,
-        });
-
-        const items = await this.extractListItems(page);
-        this.logger.log(`Страница ${pages}: найдено ${items.length} закупок`);
-
-        for (const item of items) {
-          try {
-            await this.tendersService.saveBasic(item);
-            collected++;
-            this.progress.collected = collected;
-          } catch (e) {
-            this.logger.warn(
-              `Не сохранил ${item.number}: ${(e as Error).message}`,
-            );
-          }
-        }
-        this.progress.pages = pages;
-
-        const hasNext = await page.evaluate(() => {
-          const btn = document.querySelector('.ui-paginator-next');
-          return !!btn && !btn.classList.contains('ui-state-disabled');
-        });
-        if (!hasNext) {
-          this.logger.log('Пагинация закончилась');
-          break;
-        }
-
-        await page.evaluate(() => {
-          (
-            document.querySelector('.ui-paginator-next') as HTMLElement
-          )?.click();
-        });
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-    } catch (e) {
-      this.logger.error(`Ошибка сбора: ${(e as Error).message}`);
+      await this.safeGoto(page, viewUrl);
+      await page.waitForSelector('.label', { timeout: 15_000 }).catch(() => {});
+      await this.expandLotRows(page);
+      const attachments = await this.extractAttachments(page);
+      const text = await this.collectDocsText(page);
+      return {
+        attachments,
+        filesText: {
+          length: text.length,
+          preview: text.slice(0, 1500),
+        },
+      };
     } finally {
       await this.closeBrowser();
-      this.progress.finishedAt = Date.now();
-      this.isRunning = false;
     }
-
-    const took = Math.round((Date.now() - this.progress.startedAt) / 1000);
-    this.logger.log(
-      `✓ Готово: ${collected} сохранено, ${pages} страниц, ${took}с`,
-    );
-    return { collected, pages };
   }
 
   // ============================================================
@@ -356,6 +461,9 @@ export class ScraperService implements OnModuleDestroy {
       const fresh = active.filter((i) => !existing.has(i.number));
       this.logger.log(`Активных: ${active.length}, новых: ${fresh.length}`);
 
+      // блок «ИСТОЧНИКИ ЦЕН» собираем один раз на весь прогон
+      const priceContext = await this.priceSourcesService.buildPriceContext();
+
       // --- 3) детальная страница (в отдельной вкладке) → AI → сохранить ---
       for (const item of fresh) {
         try {
@@ -371,8 +479,10 @@ export class ScraperService implements OnModuleDestroy {
                 })
                 .catch(() => {}); // нет лотов — парсим что есть
               const detail = await this.extractDetail(dp);
-              const text = this.buildTextForAI(item, detail);
-              const r: any = await this.aiService.analyze(text); // ← метод твоего AI-сервиса
+              const docsText = await this.collectDocsText(dp);
+              const text =
+                this.buildTextForAI(item, detail) + docsText + priceContext;
+              const r: any = await this.aiService.analyze(text);
               analysis = (r?.result ?? r)?.analysis ?? {};
             } finally {
               await dp.close(); // вкладку всегда закрываем
@@ -410,9 +520,16 @@ export class ScraperService implements OnModuleDestroy {
     return { collected: analyzed, pages };
   }
 
-  @Cron(CronExpression.EVERY_6_HOURS)
+  @Cron(CronExpression.EVERY_HOUR)
   async handleCron() {
-    this.logger.log('Cron: автоматический сбор тендеров');
-    await this.scrapeAll();
+    this.logger.log('Cron: автоматический сбор активных тендеров с анализом');
+    await this.scrapeActiveAndAnalyze();
+  }
+
+  // раз в час удаляем тендеры с истёкшим сроком подачи
+  @Cron(CronExpression.EVERY_HOUR)
+  async handleCleanup() {
+    const { deleted } = await this.tendersService.deleteExpired();
+    if (deleted) this.logger.log(`Удалено просроченных тендеров: ${deleted}`);
   }
 }

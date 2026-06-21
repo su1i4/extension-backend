@@ -43,7 +43,7 @@ export class TendersController {
     return this.tendersService.saveAnalysis(body);
   }
 
-  // список с фильтрами + пагинация
+  // список с фильтрами + сортировкой + пагинацией
   @Get()
   async list(
     @Query('verdict') verdict?: string,
@@ -52,6 +52,9 @@ export class TendersController {
     @Query('minMargin') minMargin?: string,
     @Query('minProfit') minProfit?: string,
     @Query('analyzed') analyzed?: string,
+    @Query('activeOnly') activeOnly?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -62,6 +65,9 @@ export class TendersController {
       minMargin: minMargin ? parseFloat(minMargin) : undefined,
       minProfit: minProfit ? parseInt(minProfit, 10) : undefined,
       analyzed: analyzed === '1' || analyzed === 'true',
+      activeOnly: activeOnly === '1' || activeOnly === 'true',
+      sortBy,
+      sortOrder,
       page: page ? parseInt(page, 10) : undefined,
       limit: limit ? parseInt(limit, 10) : undefined,
     });
@@ -87,12 +93,15 @@ export class TendersController {
     return this.tendersService.stats();
   }
 
-  @Post('scrape')
-  async scrape(@Query('pages') pages?: string) {
-    const maxPages = pages ? parseInt(pages, 10) : 50;
-    // НЕ await — пускаем в фон, чтобы curl не таймаутил
-    this.scraperService.scrapeAll(maxPages).catch((e) => console.error(e));
-    return { started: true, message: 'Сбор запущен в фоне, смотри логи Nest' };
+  // ручная чистка просроченных (для теста; в проде чистит крон)
+  @Post('cleanup-expired')
+  async cleanupExpired() {
+    return this.tendersService.deleteExpired();
+  }
+
+  @Get('debug-docs')
+  async debugDocs(@Query('url') url: string) {
+    return this.scraperService.debugDocs(url);
   }
 
   @Get('new-count')

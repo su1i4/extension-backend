@@ -3,6 +3,19 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Tender } from './tender.entity';
 
+// поля, по которым разрешена сортировка (whitelist — защита от инъекции в orderBy)
+const SORTABLE: Record<string, string> = {
+  publishedAt: 't.publishedAt', // дата публикации
+  deadlineAt: 't.deadlineAt', // срок подачи
+  plannedSum: 't.plannedSum', // сумма
+  margin: 't.margin', // маржа
+  profit: 't.profit', // чистая прибыль
+  grossProfit: 't.grossProfit', // валовая прибыль
+  roi: 't.roi', // ROI
+  cost: 't.cost', // себестоимость
+  createdAt: 't.createdAt', // добавлено в базу
+};
+
 @Injectable()
 export class TendersService {
   constructor(
@@ -25,7 +38,10 @@ export class TendersService {
       .match(/(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
     if (!m) return undefined;
     const [, dd, mm, yyyy, hh = '00', min = '00'] = m;
-    const d = new Date(+yyyy, +mm - 1, +dd, +hh, +min);
+    // время на портале — бишкекское (UTC+6); приводим к корректному UTC,
+    // чтобы сравнение с now() не зависело от таймзоны сервера (Render = UTC)
+    const ms = Date.UTC(+yyyy, +mm - 1, +dd, +hh, +min) - 6 * 3600 * 1000;
+    const d = new Date(ms);
     return isNaN(d.getTime()) ? undefined : d;
   }
 
@@ -225,7 +241,21 @@ export class TendersService {
     return new Set(rows.map((r) => r.number));
   }
 
-  // список с фильтрами + пагинация
+  // удалить просроченные: срок подачи известен и уже прошёл
+  // (записи без deadlineAt не трогаем — вдруг не распарсился срок)
+  async deleteExpired(): Promise<{ deleted: number }> {
+    const res = await this.repo
+      .createQueryBuilder()
+      .delete()
+      .from(Tender)
+      .where('deadlineAt IS NOT NULL AND deadlineAt < :now', {
+        now: new Date(),
+      })
+      .execute();
+    return { deleted: res.affected ?? 0 };
+  }
+
+  // список с фильтрами + сортировкой + пагинацией
   async list(params: {
     verdict?: string;
     rating?: string;
@@ -233,6 +263,9 @@ export class TendersService {
     minMargin?: number;
     minProfit?: number;
     analyzed?: boolean;
+    activeOnly?: boolean;
+    sortBy?: string;
+    sortOrder?: string;
     page?: number;
     limit?: number;
   }): Promise<{
@@ -241,14 +274,23 @@ export class TendersService {
     page: number;
     limit: number;
     totalPages: number;
+    sortBy: string;
+    sortOrder: 'ASC' | 'DESC';
   }> {
     const page = params.page && params.page > 0 ? params.page : 1;
     const limit = params.limit && params.limit > 0 ? params.limit : 50;
 
+    // сортировка: только из whitelist, дефолт — дата публикации, новые сверху
+    const sortBy =
+      params.sortBy && SORTABLE[params.sortBy] ? params.sortBy : 'publishedAt';
+    const sortOrder: 'ASC' | 'DESC' =
+      String(params.sortOrder).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
     const qb = this.repo
       .createQueryBuilder('t')
-      .orderBy('t.publishedAt', 'DESC', 'NULLS LAST')
-      .addOrderBy('t.id', 'DESC');
+      .orderBy(SORTABLE[sortBy], sortOrder, 'NULLS LAST')
+      .addOrderBy('t.id', 'DESC'); // стабильный tiebreaker
+
     if (params.verdict) qb.andWhere('t.verdict = :v', { v: params.verdict });
     if (params.rating) qb.andWhere('t.rating = :r', { r: params.rating });
     if (params.minSum) qb.andWhere('t.plannedSum >= :s', { s: params.minSum });
@@ -257,6 +299,9 @@ export class TendersService {
     if (params.minProfit !== undefined)
       qb.andWhere('t.profit >= :p', { p: params.minProfit });
     if (params.analyzed) qb.andWhere('t.verdict IS NOT NULL');
+    // только активные: срок подачи ещё не прошёл (записи без срока не показываем)
+    if (params.activeOnly)
+      qb.andWhere('t.deadlineAt > :now', { now: new Date() });
 
     qb.skip((page - 1) * limit).take(limit);
 
@@ -267,6 +312,8 @@ export class TendersService {
       page,
       limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
+      sortBy,
+      sortOrder,
     };
   }
 

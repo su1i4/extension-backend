@@ -6,6 +6,6 @@ import { DocsService } from './docs.service';
 @Module({
   controllers: [AiController],
   providers: [AiService, DocsService],
-  exports: [AiService],
+  exports: [AiService, DocsService],
 })
 export class AiModule {}
