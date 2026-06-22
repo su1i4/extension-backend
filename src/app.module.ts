@@ -1,33 +1,37 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 
 import { AiModule } from './ai/ai.module';
 import { TendersModule } from './tenders/tenders.module';
 import { Tender } from './tenders/tender.entity';
-import { ScheduleModule } from '@nestjs/schedule';
-import { PriceSource } from './source/source.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forRoot({
-      type: 'postgres',
-      host: 'localhost',
-      port: 5433,
-      username: 'postgres',
-      password: 'root',
-      database: 'lessons',
-      synchronize: true,
-      dropSchema: true,
-      entities: [Tender, PriceSource],
+    ConfigModule.forRoot({
+      isGlobal: true,
     }),
-    ConfigModule.forRoot({ isGlobal: true }),
+
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        type: 'postgres',
+        url: configService.get<string>('DATABASE_URL'),
+        entities: [Tender],
+        autoLoadEntities: true,
+        synchronize: true,
+        ssl:
+          process.env.NODE_ENV === 'production'
+            ? { rejectUnauthorized: false }
+            : false,
+      }),
+    }),
+
     ScheduleModule.forRoot(),
 
     AiModule,
     TendersModule,
   ],
-  controllers: [],
-  providers: [],
 })
 export class AppModule {}
