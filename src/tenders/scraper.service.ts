@@ -142,6 +142,7 @@ export class ScraperService implements OnModuleDestroy {
     });
   }
 
+  
   // раскрыть строки лотов (оба варианта таблицы: lotsTable_data / lotsTable2_data)
   private async expandLotRows(page: puppeteer.Page) {
     const sel = '[id*="lotsTable"][id$="_data"] .ui-row-toggler[aria-expanded="false"]';
