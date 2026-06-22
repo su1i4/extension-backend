@@ -57,10 +57,12 @@ export class TendersController {
     @Query('sortOrder') sortOrder?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
+    @Query('category') category?: string,
   ) {
     return this.tendersService.list({
       verdict,
       rating,
+      category,
       minSum: minSum ? parseInt(minSum, 10) : undefined,
       minMargin: minMargin ? parseFloat(minMargin) : undefined,
       minProfit: minProfit ? parseInt(minProfit, 10) : undefined,
@@ -75,7 +77,7 @@ export class TendersController {
 
   @Post('scrape-active')
   async scrapeActive(@Query('pages') pages?: string) {
-    const maxPages = pages ? parseInt(pages, 10) : 50;
+    const maxPages = pages ? parseInt(pages, 10) : 1;
     this.scraperService
       .scrapeActiveAndAnalyze(maxPages)
       .catch((e) => console.error(e));

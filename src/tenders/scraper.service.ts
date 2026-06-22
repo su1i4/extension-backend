@@ -17,7 +17,13 @@ export class ScraperService implements OnModuleDestroy {
   private browser: puppeteer.Browser | null = null;
 
   // прогресс для UI
-  private progress = { collected: 0, pages: 0, finishedAt: 0, startedAt: 0 };
+  private progress = {
+    collected: 0,
+    pages: 0,
+    finishedAt: 0,
+    startedAt: 0,
+    error: null as string | null,
+  };
 
   constructor(
     private readonly tendersService: TendersService,
@@ -41,6 +47,7 @@ export class ScraperService implements OnModuleDestroy {
       pages: this.progress.pages,
       startedAt: this.progress.startedAt,
       finishedAt: this.progress.finishedAt,
+      error: this.progress.error,
     };
   }
 
@@ -401,7 +408,7 @@ export class ScraperService implements OnModuleDestroy {
   // прогнать через AI, сохранить (всплывут в уведомлениях)
   // ============================================================
   async scrapeActiveAndAnalyze(
-    maxPages = 50,
+    maxPages = 1,
   ): Promise<{ collected: number; pages: number }> {
     if (this.isRunning) {
       this.logger.warn('Сбор уже идёт, новый запуск отклонён');
@@ -414,6 +421,7 @@ export class ScraperService implements OnModuleDestroy {
       pages: 0,
       finishedAt: 0,
       startedAt: Date.now(),
+      error: null,
     };
     let analyzed = 0;
     let pages = 0;
@@ -505,12 +513,22 @@ export class ScraperService implements OnModuleDestroy {
           analyzed++;
           this.progress.collected = analyzed;
         } catch (e) {
-          this.logger.warn(
-            `Не обработал ${item.number}: ${(e as Error).message}`,
-          );
+          const msg = (e as Error)?.message || String(e);
+          const isQuota =
+            msg.includes('429') ||
+            msg.includes('RESOURCE_EXHAUSTED') ||
+            /quota/i.test(msg);
+          if (isQuota) {
+            this.progress.error =
+              'Превышен лимит запросов Gemini (free-tier, 20/день). Анализ остановлен, попробуйте позже.';
+            this.logger.warn('Лимит Gemini достигнут — прогон остановлен');
+            break; // дальше все запросы упрутся в 429 — нет смысла продолжать
+          }
+          this.logger.warn(`Не обработал ${item.number}: ${msg}`);
         }
       }
     } catch (e) {
+      this.progress.error = `Ошибка сбора: ${(e as Error).message}`;
       this.logger.error(`Ошибка сбора: ${(e as Error).message}`);
     } finally {
       await this.closeBrowser();
