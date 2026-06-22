@@ -41,6 +41,9 @@ export class AiService {
 
 ШАГ 8. Общий вывод по всей закупке: verdict, risks, profitable.
 
+ШАГ 9. Категория закупки: выбери СТРОГО ОДНУ из списка по названию и спецификации. Если ничего не подходит — "Прочее". Не придумывай свои категории.
+Список: "Компьютеры", "Принтеры", "Сканеры", "Сетевое оборудование", "Медицина", "Строительство", "Автотранспорт", "Продукты", "ГСМ", "Канцелярия", "Мебель", "Услуги", "Прочее".
+
 Верни ответ СТРОГО в формате JSON без markdown и пояснений:
 {
   "verdict": "Стоит участвовать" | "С осторожностью" | "Не рекомендуется",
@@ -89,7 +92,10 @@ ${text}`;
 
     const sources =
       response.candidates?.[0]?.groundingMetadata?.groundingChunks
-        ?.map((c: any) => ({ title: c.web?.title ?? '', uri: c.web?.uri ?? '' }))
+        ?.map((c: any) => ({
+          title: c.web?.title ?? '',
+          uri: c.web?.uri ?? '',
+        }))
         .filter((s: any) => s.uri) ?? [];
 
     return { analysis: parsed, sources };
@@ -135,18 +141,57 @@ ${list}`;
 
   // ---------- хелпер: достаём JSON даже если AI налепил текста вокруг ----------
   private extractJson(raw: string): any {
-    const tryParse = (open: string, close: string) => {
-      const start = raw.indexOf(open);
-      const end = raw.lastIndexOf(close);
-      if (start !== -1 && end !== -1 && end > start) {
-        try {
-          return JSON.parse(raw.slice(start, end + 1));
-        } catch {
-          return null;
+    if (!raw) return {};
+    // снять markdown-обёртку ```json ... ```
+    const s = raw
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    // выбрать, что идёт раньше — объект или массив
+    const iObj = s.indexOf('{');
+    const iArr = s.indexOf('[');
+    let start = -1;
+    let open = '{';
+    let close = '}';
+    if (iArr !== -1 && (iObj === -1 || iArr < iObj)) {
+      start = iArr;
+      open = '[';
+      close = ']';
+    } else if (iObj !== -1) {
+      start = iObj;
+    }
+    if (start === -1) return { raw };
+
+    // идём по символам, считаем глубину скобок, игнорим скобки внутри строк
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let end = -1;
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === open) depth++;
+      else if (ch === close) {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
         }
       }
-      return null;
-    };
-    return tryParse('[', ']') ?? tryParse('{', '}') ?? { raw };
+    }
+    if (end === -1) return { raw }; // блок оборвался (truncation)
+
+    try {
+      return JSON.parse(s.slice(start, end + 1));
+    } catch {
+      return { raw };
+    }
   }
 }

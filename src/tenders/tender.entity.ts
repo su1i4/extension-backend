@@ -80,6 +80,10 @@ export class Tender {
   @Column({ type: 'jsonb', nullable: true })
   analysis?: any;
 
+  @Index()
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  category?: string;
+
   @Column({ type: 'text', nullable: true })
   url?: string;
 

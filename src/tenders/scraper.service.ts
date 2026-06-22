@@ -484,6 +484,8 @@ export class ScraperService implements OnModuleDestroy {
                 this.buildTextForAI(item, detail) + docsText + priceContext;
               const r: any = await this.aiService.analyze(text);
               analysis = (r?.result ?? r)?.analysis ?? {};
+              const sources = r?.sources ?? r?.result?.sources ?? [];
+              if (sources?.length) analysis.sources = sources;
             } finally {
               await dp.close(); // вкладку всегда закрываем
             }
