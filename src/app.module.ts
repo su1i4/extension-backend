@@ -18,6 +18,7 @@ import { PriceSource } from './source/source.entity';
       password: 'root',
       database: 'lessons',
       synchronize: true,
+      dropSchema: true,
       entities: [Tender, PriceSource],
     }),
     ConfigModule.forRoot({ isGlobal: true }),
