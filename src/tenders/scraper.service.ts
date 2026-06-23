@@ -20,7 +20,15 @@ export class ScraperService implements OnModuleDestroy {
   private isRunning = false;
   private browser: puppeteer.Browser | null = null;
 
-  private progress = { collected: 0, pages: 0, finishedAt: 0, startedAt: 0, error: null as string | null };
+  private progress = {
+    collected: 0,
+    failed: 0,
+    pages: 0,
+    startedAt: 0,
+    finishedAt: 0,
+    error: null as string | null,
+    lastWarn: null as string | null,
+  };
 
   constructor(
     private readonly tendersService: TendersService,
@@ -40,10 +48,12 @@ export class ScraperService implements OnModuleDestroy {
     return {
       running: this.isRunning,
       collected: this.progress.collected,
+      failed: this.progress.failed,
       pages: this.progress.pages,
       startedAt: this.progress.startedAt,
       finishedAt: this.progress.finishedAt,
       error: this.progress.error,
+      lastWarn: this.progress.lastWarn,
     };
   }
 
@@ -54,7 +64,10 @@ export class ScraperService implements OnModuleDestroy {
   private async safeGoto(page: puppeteer.Page, url: string, attempts = 2) {
     for (let i = 0; i < attempts; i++) {
       try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+        await page.goto(url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60_000,
+        });
         return;
       } catch (e) {
         if (i === attempts - 1) throw e;
@@ -65,10 +78,13 @@ export class ScraperService implements OnModuleDestroy {
 
   private isDeadlineActive(deadline?: string): boolean {
     if (!deadline) return false;
-    const m = deadline.trim().match(/(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+    const m = deadline
+      .trim()
+      .match(/(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
     if (!m) return false;
     const [, dd, mm, yyyy, hh = '23', min = '59'] = m;
-    const deadlineUtcMs = Date.UTC(+yyyy, +mm - 1, +dd, +hh, +min) - 6 * 3600 * 1000;
+    const deadlineUtcMs =
+      Date.UTC(+yyyy, +mm - 1, +dd, +hh, +min) - 6 * 3600 * 1000;
     return deadlineUtcMs > Date.now();
   }
 
@@ -128,13 +144,17 @@ export class ScraperService implements OnModuleDestroy {
           type: cellValue(cells[2]),
           name: (
             row.querySelector('.nameTender')?.textContent || cellValue(cells[3])
-          ).trim().replace(/\s+/g, ' '),
+          )
+            .trim()
+            .replace(/\s+/g, ' '),
           method: cellValue(cells[5]),
           plannedSum: cellValue(cells[6]),
           publishDate: cellValue(cells[7]),
           deadline: cellValue(cells[8]),
         };
-        const link = row.querySelector('a[href*="view.xhtml"]') as HTMLAnchorElement | null;
+        const link = row.querySelector(
+          'a[href*="view.xhtml"]',
+        ) as HTMLAnchorElement | null;
         if (link) it.url = link.href;
         if (it.number) out.push(it);
       });
@@ -142,21 +162,26 @@ export class ScraperService implements OnModuleDestroy {
     });
   }
 
-  
   // раскрыть строки лотов (оба варианта таблицы: lotsTable_data / lotsTable2_data)
   private async expandLotRows(page: puppeteer.Page) {
-    const sel = '[id*="lotsTable"][id$="_data"] .ui-row-toggler[aria-expanded="false"]';
+    const sel =
+      '[id*="lotsTable"][id$="_data"] .ui-row-toggler[aria-expanded="false"]';
     for (let i = 0; i < 50; i++) {
       const toggler = await page.$(sel);
       if (!toggler) break;
       const before = await page
-        .$$eval('[id*="lotsTable"][id$="_data"] tr.ui-expanded-row-content', (els) => els.length)
+        .$$eval(
+          '[id*="lotsTable"][id$="_data"] tr.ui-expanded-row-content',
+          (els) => els.length,
+        )
         .catch(() => 0);
       await toggler.click();
       await page
         .waitForFunction(
           (n: number) =>
-            document.querySelectorAll('[id*="lotsTable"][id$="_data"] tr.ui-expanded-row-content').length > n,
+            document.querySelectorAll(
+              '[id*="lotsTable"][id$="_data"] tr.ui-expanded-row-content',
+            ).length > n,
           { timeout: 8000 },
           before,
         )
@@ -170,27 +195,32 @@ export class ScraperService implements OnModuleDestroy {
   ): Promise<{ lots: any[]; requirements: any[] }> {
     return page.evaluate(() => {
       const lots: any[] = [];
-      document.querySelectorAll('[id*="lotsTable"][id$="_data"] > tr').forEach((row) => {
-        const cells = row.querySelectorAll('td');
-        const lot: any = {};
-        cells.forEach((cell) => {
-          const labelSpan = cell.querySelector('span:not(.bold)');
-          const boldSpan = cell.querySelector('span.bold');
-          if (!labelSpan) return;
-          const key = (labelSpan.textContent || '').trim();
-          let value = boldSpan
-            ? (boldSpan.textContent || '').trim()
-            : (cell.textContent || '').replace(key, '').trim();
-          value = value.replace(/\s+/g, ' ');
-          if (key === '№' || key === '#') lot.number = value;
-          else if (key === 'Наименование лота') lot.name = value;
-          else if (key === 'Сумма') lot.sum = value;
-          else if (key.includes('Адрес')) lot.place = value;
-          else if (key.includes('Сроки поставки') || key.includes('Срок выполнения'))
-            lot.deliveryTerm = value;
+      document
+        .querySelectorAll('[id*="lotsTable"][id$="_data"] > tr')
+        .forEach((row) => {
+          const cells = row.querySelectorAll('td');
+          const lot: any = {};
+          cells.forEach((cell) => {
+            const labelSpan = cell.querySelector('span:not(.bold)');
+            const boldSpan = cell.querySelector('span.bold');
+            if (!labelSpan) return;
+            const key = (labelSpan.textContent || '').trim();
+            let value = boldSpan
+              ? (boldSpan.textContent || '').trim()
+              : (cell.textContent || '').replace(key, '').trim();
+            value = value.replace(/\s+/g, ' ');
+            if (key === '№' || key === '#') lot.number = value;
+            else if (key === 'Наименование лота') lot.name = value;
+            else if (key === 'Сумма') lot.sum = value;
+            else if (key.includes('Адрес')) lot.place = value;
+            else if (
+              key.includes('Сроки поставки') ||
+              key.includes('Срок выполнения')
+            )
+              lot.deliveryTerm = value;
+          });
+          if (lot.number || lot.name) lots.push(lot);
         });
-        if (lot.number || lot.name) lots.push(lot);
-      });
 
       const requirements: any[] = [];
       document.querySelectorAll('.publicTableData').forEach((table) => {
@@ -200,8 +230,12 @@ export class ScraperService implements OnModuleDestroy {
             const tds = tr.querySelectorAll('td');
             if (tds.length >= 3)
               requirements.push({
-                qualification: (tds[1].textContent || '').trim().replace(/\s+/g, ' '),
-                requirement: (tds[2].textContent || '').trim().replace(/\s+/g, ' '),
+                qualification: (tds[1].textContent || '')
+                  .trim()
+                  .replace(/\s+/g, ' '),
+                requirement: (tds[2].textContent || '')
+                  .trim()
+                  .replace(/\s+/g, ' '),
               });
           });
         }
@@ -223,25 +257,33 @@ export class ScraperService implements OnModuleDestroy {
 
       document.querySelectorAll('table').forEach((table) => {
         const headers = Array.from(table.querySelectorAll('thead th'));
-        const colIdx = headers.findIndex((th) => norm(th.textContent || '').includes(HEADER));
+        const colIdx = headers.findIndex((th) =>
+          norm(th.textContent || '').includes(HEADER),
+        );
         if (colIdx === -1) return;
 
         table.querySelectorAll('tbody > tr').forEach((row) => {
           const cells = row.querySelectorAll(':scope > td');
           const cell = cells[colIdx];
           if (!cell) return;
-          cell.querySelectorAll('a[href*="/popp/download?key="]').forEach((a) => {
-            const href = (a as HTMLAnchorElement).href;
-            let key = '';
-            try {
-              key = new URL(href).searchParams.get('key') || '';
-            } catch {
-              key = '';
-            }
-            if (!key || seen.has(href)) return;
-            seen.add(href);
-            out.push({ label: HEADER, filename: norm(a.textContent || ''), url: href });
-          });
+          cell
+            .querySelectorAll('a[href*="/popp/download?key="]')
+            .forEach((a) => {
+              const href = (a as HTMLAnchorElement).href;
+              let key = '';
+              try {
+                key = new URL(href).searchParams.get('key') || '';
+              } catch {
+                key = '';
+              }
+              if (!key || seen.has(href)) return;
+              seen.add(href);
+              out.push({
+                label: HEADER,
+                filename: norm(a.textContent || ''),
+                url: href,
+              });
+            });
         });
       });
       return out;
@@ -262,12 +304,15 @@ export class ScraperService implements OnModuleDestroy {
           const len = parseInt(res.headers.get('content-length') || '0', 10);
           if (len && len > limit) return { error: `too big ${len}` };
           const buf = await res.arrayBuffer();
-          if (buf.byteLength > limit) return { error: `too big ${buf.byteLength}` };
+          if (buf.byteLength > limit)
+            return { error: `too big ${buf.byteLength}` };
           const bytes = new Uint8Array(buf);
           let binary = '';
           const chunk = 0x8000;
           for (let i = 0; i < bytes.length; i += chunk) {
-            binary += String.fromCharCode(...(bytes.subarray(i, i + chunk) as unknown as number[]));
+            binary += String.fromCharCode(
+              ...(bytes.subarray(i, i + chunk) as unknown as number[]),
+            );
           }
           return { base64: btoa(binary), contentType };
         },
@@ -281,7 +326,10 @@ export class ScraperService implements OnModuleDestroy {
         return null;
       }
       const r = result as { base64: string; contentType: string };
-      return { buffer: Buffer.from(r.base64, 'base64'), contentType: r.contentType };
+      return {
+        buffer: Buffer.from(r.base64, 'base64'),
+        contentType: r.contentType,
+      };
     } catch (e) {
       this.logger.warn(`Скачивание не удалось ${url}: ${(e as Error).message}`);
       return null;
@@ -293,9 +341,11 @@ export class ScraperService implements OnModuleDestroy {
     if (/\.(pdf|docx?|xlsx?)$/i.test(base)) return base;
     const map: Record<string, string> = {
       'application/pdf': 'pdf',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
+        'docx',
       'application/msword': 'doc',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
+        'xlsx',
       'application/vnd.ms-excel': 'xls',
     };
     const ct = contentType.split(';')[0].trim().toLowerCase();
@@ -313,10 +363,15 @@ export class ScraperService implements OnModuleDestroy {
       const dl = await this.downloadFile(page, att.url);
       if (!dl) continue;
       if (dl.contentType.toLowerCase().includes('text/html')) {
-        this.logger.warn(`Пропуск ${att.filename || att.url}: вернулся HTML (нужна авторизация?)`);
+        this.logger.warn(
+          `Пропуск ${att.filename || att.url}: вернулся HTML (нужна авторизация?)`,
+        );
         continue;
       }
-      files.push({ buffer: dl.buffer, filename: this.ensureExt(att.filename || att.label, dl.contentType) });
+      files.push({
+        buffer: dl.buffer,
+        filename: this.ensureExt(att.filename || att.label, dl.contentType),
+      });
     }
     if (!files.length) return '';
 
@@ -360,7 +415,10 @@ export class ScraperService implements OnModuleDestroy {
       await this.expandLotRows(page);
       const attachments = await this.extractAttachments(page);
       const text = await this.collectDocsText(page);
-      return { attachments, filesText: { length: text.length, preview: text.slice(0, 1500) } };
+      return {
+        attachments,
+        filesText: { length: text.length, preview: text.slice(0, 1500) },
+      };
     } finally {
       await this.closeBrowser();
     }
@@ -370,7 +428,11 @@ export class ScraperService implements OnModuleDestroy {
     const page = await this.launchBrowser();
     try {
       await this.safeGoto(page, viewUrl);
-      await page.waitForSelector('[id*="lotsTable"][id$="_data"], .label', { timeout: 15_000 }).catch(() => {});
+      await page
+        .waitForSelector('[id*="lotsTable"][id$="_data"], .label', {
+          timeout: 15_000,
+        })
+        .catch(() => {});
       const item = await this.extractHeaderItem(page);
       const detail = await this.extractDetail(page);
       const docsText = await this.collectDocsText(page);
@@ -402,7 +464,9 @@ export class ScraperService implements OnModuleDestroy {
     let pages = 0;
     while (pages < maxPages) {
       pages++;
-      await page.waitForSelector('[id$="table_data"] > tr', { timeout: 30_000 });
+      await page.waitForSelector('[id$="table_data"] > tr', {
+        timeout: 30_000,
+      });
 
       const items = await this.extractListItems(page);
       items.forEach((it) => {
@@ -424,6 +488,29 @@ export class ScraperService implements OnModuleDestroy {
     return pages;
   }
 
+  // 503/UNAVAILABLE — временные, ретраим с backoff. 429/quota не ретраим (бессмысленно)
+  private async analyzeWithRetry(text: string, attempts = 3): Promise<any> {
+    let lastErr: any;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await this.aiService.analyze(text);
+      } catch (e) {
+        lastErr = e;
+        const msg = (e as Error)?.message || String(e);
+        const overloaded =
+          msg.includes('503') ||
+          /UNAVAILABLE|high demand|overloaded/i.test(msg);
+        if (!overloaded || i === attempts - 1) throw e;
+        const delay = 2000 * 2 ** i; // 2с → 4с → 8с
+        this.logger.warn(
+          `Gemini 503, повтор через ${delay / 1000}с (попытка ${i + 1}/${attempts})`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+    throw lastErr;
+  }
+
   // ============================================================
   // АКТИВНЫЕ + АНАЛИЗ
   // ============================================================
@@ -436,8 +523,17 @@ export class ScraperService implements OnModuleDestroy {
     }
 
     this.isRunning = true;
-    this.progress = { collected: 0, pages: 0, finishedAt: 0, startedAt: Date.now(), error: null };
+    this.progress = {
+      collected: 0,
+      failed: 0,
+      pages: 0,
+      finishedAt: 0,
+      startedAt: Date.now(),
+      error: null,
+      lastWarn: null,
+    };
     let analyzed = 0;
+    let failed = 0;
     let pages = 0;
 
     try {
@@ -454,7 +550,9 @@ export class ScraperService implements OnModuleDestroy {
       }
 
       // --- 2) только новые (которых нет в базе) ---
-      const existing = await this.tendersService.existingNumbers(active.map((i) => i.number));
+      const existing = await this.tendersService.existingNumbers(
+        active.map((i) => i.number),
+      );
       const fresh = active.filter((i) => !existing.has(i.number));
       this.logger.log(`Активных: ${active.length}, новых: ${fresh.length}`);
 
@@ -470,12 +568,15 @@ export class ScraperService implements OnModuleDestroy {
               await dp.setUserAgent(UA);
               await this.safeGoto(dp, item.url);
               await dp
-                .waitForSelector('[id*="lotsTable"][id$="_data"], .label', { timeout: 15_000 })
+                .waitForSelector('[id*="lotsTable"][id$="_data"], .label', {
+                  timeout: 15_000,
+                })
                 .catch(() => {});
               const detail = await this.extractDetail(dp);
               const docsText = await this.collectDocsText(dp);
-              const text = this.buildTextForAI(item, detail) + docsText + priceContext;
-              const r: any = await this.aiService.analyze(text);
+              const text =
+                this.buildTextForAI(item, detail) + docsText + priceContext;
+              const r: any = await this.analyzeWithRetry(text);
               analysis = (r?.result ?? r)?.analysis ?? {};
               const sources = r?.sources ?? r?.result?.sources ?? [];
               if (sources?.length) analysis.sources = sources;
@@ -500,13 +601,27 @@ export class ScraperService implements OnModuleDestroy {
         } catch (e) {
           const msg = (e as Error)?.message || String(e);
           const isQuota =
-            msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || /quota/i.test(msg);
+            msg.includes('429') ||
+            msg.includes('RESOURCE_EXHAUSTED') ||
+            /quota/i.test(msg);
+
+          // квота исчерпана — продолжать смысла нет, останавливаем весь прогон
           if (isQuota) {
             this.progress.error =
               'Превышен лимит запросов Gemini (free-tier, 20/день). Анализ остановлен, попробуйте позже.';
             this.logger.warn('Лимит Gemini достигнут — прогон остановлен');
             break;
           }
+
+          // остальное (в т.ч. 503 после ретраев) — копим как «не удалось», идём дальше
+          failed++;
+          this.progress.failed = failed;
+          const overloaded =
+            msg.includes('503') ||
+            /UNAVAILABLE|high demand|overloaded/i.test(msg);
+          this.progress.lastWarn = overloaded
+            ? 'Gemini перегружен (503) — часть тендеров не проанализирована'
+            : `Ошибка анализа: ${msg.slice(0, 120)}`;
           this.logger.warn(`Не обработал ${item.number}: ${msg}`);
         }
       }
@@ -519,7 +634,9 @@ export class ScraperService implements OnModuleDestroy {
       this.isRunning = false;
     }
 
-    this.logger.log(`✓ Проанализировано новых: ${analyzed} (страниц ${pages})`);
+    this.logger.log(
+      `✓ Проанализировано новых: ${analyzed}, не удалось: ${failed} (страниц ${pages})`,
+    );
     return { collected: analyzed, pages };
   }
 
