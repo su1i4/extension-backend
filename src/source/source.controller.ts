@@ -21,7 +21,9 @@ export class PriceSourcesController {
   @Get()
   list() {
     return this.svc.list();
-  }
+  } 
+
+  
 
   // готовый текстовый блок «ИСТОЧНИКИ ЦЕН» — для клиентского анализа в расширении
   @Get('context')
